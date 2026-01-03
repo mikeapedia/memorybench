@@ -161,13 +161,14 @@ export class ZepProvider implements Provider {
         episodes: batch,
       })
 
-      // Collect taskId from returned episodes (same taskId for all in batch)
-      if (result.length > 0 && result[0].taskId) {
-        taskIds.push(result[0].taskId)
+      for (const episode of result) {
+        if (episode.taskId) {
+          taskIds.push(episode.taskId)
+        }
       }
     }
 
-    return { documentIds: [], taskIds }
+    return { documentIds: [], taskIds: [...new Set(taskIds)] }
   }
 
   async awaitIndexing(
