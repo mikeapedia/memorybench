@@ -2,11 +2,13 @@ import type { ProviderName } from "../../types/provider"
 import type { BenchmarkName } from "../../types/benchmark"
 import type { PhaseId, SamplingConfig, SampleType } from "../../types/checkpoint"
 import type { ConcurrencyConfig } from "../../types/concurrency"
+import type { EnsembleConfig } from "../../types/ensemble"
 import { PHASE_ORDER, getPhasesFromPhase } from "../../types/checkpoint"
 import { orchestrator, CheckpointManager } from "../../orchestrator"
 import { getAvailableProviders } from "../../providers"
 import { getAvailableBenchmarks } from "../../benchmarks"
 import { listAvailableModels, DEFAULT_ANSWERING_MODEL } from "../../utils/models"
+import { setEnsembleConfig } from "../../utils/config"
 import { logger } from "../../utils/logger"
 
 const DEFAULT_JUDGE_MODEL = "gpt-4o"
@@ -23,6 +25,7 @@ interface RunArgs {
   force?: boolean
   fromPhase?: PhaseId
   concurrency?: ConcurrencyConfig
+  ensembleConfig?: string
 }
 
 function generateRunId(): string {
@@ -82,6 +85,8 @@ export function parseRunArgs(args: string[]): RunArgs | null {
       concurrency.evaluate = parseInt(args[++i], 10)
     } else if (arg === "--force") {
       parsed.force = true
+    } else if (arg === "--ensemble-config") {
+      parsed.ensembleConfig = args[++i]
     }
   }
 
@@ -130,6 +135,7 @@ export async function runCommand(args: string[]): Promise<void> {
     console.log("  --concurrency-answer N    Concurrency for answer phase")
     console.log("  --concurrency-evaluate N  Concurrency for evaluate phase")
     console.log("  --force                Clear existing checkpoint and start fresh")
+    console.log("  --ensemble-config PATH JSON config file for ensemble provider")
     console.log("")
     console.log(`Available models: ${listAvailableModels().join(", ")}`)
     return
@@ -197,6 +203,23 @@ export async function runCommand(args: string[]): Promise<void> {
       mode: "limit",
       limit: parsed.limit,
     }
+  }
+
+  // Load ensemble config if provided
+  if (parsed.ensembleConfig) {
+    try {
+      const configPath = parsed.ensembleConfig
+      const file = Bun.file(configPath)
+      const ensembleJson = await file.json() as EnsembleConfig
+      setEnsembleConfig(ensembleJson)
+      logger.info(`Loaded ensemble config from ${configPath}`)
+    } catch (e) {
+      logger.error(`Failed to load ensemble config: ${e}`)
+      return
+    }
+  } else if (parsed.provider === "ensemble") {
+    logger.error("Ensemble provider requires --ensemble-config <path>")
+    return
   }
 
   await orchestrator.run({

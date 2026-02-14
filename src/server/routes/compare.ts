@@ -1,5 +1,6 @@
 import { existsSync, readdirSync } from "fs"
 import { join } from "path"
+import { z } from "zod"
 import { CheckpointManager } from "../../orchestrator/checkpoint"
 import { batchManager } from "../../orchestrator/batch"
 import type { CompareManifest } from "../../orchestrator/batch"
@@ -9,7 +10,31 @@ import type { ProviderName } from "../../types/provider"
 import type { BenchmarkName } from "../../types/benchmark"
 import type { SamplingConfig } from "../../types/checkpoint"
 
+const startCompareSchema = z.object({
+  providers: z
+    .array(z.enum(["supermemory", "mem0", "zep", "hindsight", "letta", "ensemble"]))
+    .min(1),
+  benchmark: z.enum(["locomo", "longmemeval", "convomem"]),
+  judgeModel: z.string().min(1),
+  answeringModel: z.string().min(1),
+  sampling: z
+    .object({
+      type: z.enum(["consecutive", "random"]).optional(),
+      seed: z.number().optional(),
+    })
+    .optional(),
+  force: z.boolean().optional(),
+})
+
 const checkpointManager = new CheckpointManager()
+
+/** Reject IDs containing path-traversal characters (../ or \\). */
+const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
+
+function validateId(id: string): string | null {
+  if (!id || !SAFE_ID.test(id)) return null
+  return id
+}
 
 const COMPARE_DIR = "./data/compare"
 
@@ -145,18 +170,15 @@ export async function handleCompareRoutes(req: Request, url: URL): Promise<Respo
   // POST /api/compare/start - Start new comparison
   if (method === "POST" && pathname === "/api/compare/start") {
     try {
-      const body = await req.json()
-      const { providers, benchmark, judgeModel, answeringModel, sampling, force } = body
-
-      if (!providers || !Array.isArray(providers) || providers.length === 0) {
-        return json({ error: "Missing or invalid providers array" }, 400)
-      }
-      if (!benchmark || !judgeModel || !answeringModel) {
+      const raw = await req.json()
+      const parsed = startCompareSchema.safeParse(raw)
+      if (!parsed.success) {
         return json(
-          { error: "Missing required fields: benchmark, judgeModel, answeringModel" },
+          { error: "Invalid request body", details: parsed.error.flatten().fieldErrors },
           400
         )
       }
+      const { providers, benchmark, judgeModel, answeringModel, sampling, force } = parsed.data
 
       // Initialize comparison and wait for manifest + checkpoints to be created
       const { compareId } = await initializeComparison({
@@ -170,14 +192,15 @@ export async function handleCompareRoutes(req: Request, url: URL): Promise<Respo
 
       return json({ message: "Comparison started", compareId })
     } catch (e) {
-      return json({ error: e instanceof Error ? e.message : "Invalid request body" }, 400)
+      return json({ error: "Invalid request body" }, 400)
     }
   }
 
   // GET /api/compare/:compareId - Get comparison detail with run progress
   const compareIdMatch = pathname.match(/^\/api\/compare\/([^/]+)$/)
   if (method === "GET" && compareIdMatch) {
-    const compareId = decodeURIComponent(compareIdMatch[1])
+    const compareId = validateId(decodeURIComponent(compareIdMatch[1]))
+    if (!compareId) return json({ error: "Invalid compareId" }, 400)
     const manifest = batchManager.loadManifest(compareId)
     if (!manifest) {
       return json({ error: "Comparison not found" }, 404)
@@ -248,7 +271,8 @@ export async function handleCompareRoutes(req: Request, url: URL): Promise<Respo
   // GET /api/compare/:compareId/report - Get aggregated reports
   const reportMatch = pathname.match(/^\/api\/compare\/([^/]+)\/report$/)
   if (method === "GET" && reportMatch) {
-    const compareId = decodeURIComponent(reportMatch[1])
+    const compareId = validateId(decodeURIComponent(reportMatch[1]))
+    if (!compareId) return json({ error: "Invalid compareId" }, 400)
     const manifest = batchManager.loadManifest(compareId)
     if (!manifest) {
       return json({ error: "Comparison not found" }, 404)
@@ -257,6 +281,61 @@ export async function handleCompareRoutes(req: Request, url: URL): Promise<Respo
     const reports = batchManager.getReports(manifest)
     if (reports.length === 0) {
       return json({ error: "No reports available yet" }, 404)
+    }
+
+    // Compute ensemble analysis metrics if both ensemble and individual runs exist
+    const ensembleReports = reports.filter((r) => r.report.ensembleMetadata)
+    const individualReports = reports.filter((r) => !r.report.ensembleMetadata)
+
+    let ensembleAnalysis = null
+    if (ensembleReports.length > 0 && individualReports.length > 0) {
+      const bestIndividualAccuracy = Math.max(
+        ...individualReports.map((r) => r.report.summary.accuracy)
+      )
+      const bestIndividualProvider = individualReports.find(
+        (r) => r.report.summary.accuracy === bestIndividualAccuracy
+      )?.provider
+
+      ensembleAnalysis = {
+        bestIndividualProvider,
+        bestIndividualAccuracy,
+        ensembles: ensembleReports.map(({ provider, report }) => {
+          const lift = report.summary.accuracy - bestIndividualAccuracy
+
+          // Per-question-type lift
+          const questionTypeLift: Record<
+            string,
+            { ensembleAccuracy: number; bestIndividualAccuracy: number; lift: number; bestIndividualProvider: string }
+          > = {}
+          for (const type of Object.keys(report.byQuestionType)) {
+            const ensStats = report.byQuestionType[type]
+            let bestIndAcc = 0
+            let bestProv = ""
+            for (const { provider: p, report: r } of individualReports) {
+              const s = r.byQuestionType[type]
+              if (s && s.accuracy > bestIndAcc) {
+                bestIndAcc = s.accuracy
+                bestProv = p
+              }
+            }
+            questionTypeLift[type] = {
+              ensembleAccuracy: ensStats.accuracy,
+              bestIndividualAccuracy: bestIndAcc,
+              lift: ensStats.accuracy - bestIndAcc,
+              bestIndividualProvider: bestProv,
+            }
+          }
+
+          return {
+            provider,
+            accuracy: report.summary.accuracy,
+            lift,
+            strategyName: report.ensembleMetadata?.strategyName,
+            subProviders: report.ensembleMetadata?.subProviders,
+            questionTypeLift,
+          }
+        }),
+      }
     }
 
     // Return aggregated data
@@ -269,13 +348,15 @@ export async function handleCompareRoutes(req: Request, url: URL): Promise<Respo
         provider: r.provider,
         report: r.report,
       })),
+      ensembleAnalysis,
     })
   }
 
   // POST /api/compare/:compareId/stop - Stop all runs in comparison
   const stopMatch = pathname.match(/^\/api\/compare\/([^/]+)\/stop$/)
   if (method === "POST" && stopMatch) {
-    const compareId = decodeURIComponent(stopMatch[1])
+    const compareId = validateId(decodeURIComponent(stopMatch[1]))
+    if (!compareId) return json({ error: "Invalid compareId" }, 400)
     if (!isCompareActive(compareId)) {
       return json({ error: "Comparison is not active" }, 404)
     }
@@ -297,7 +378,8 @@ export async function handleCompareRoutes(req: Request, url: URL): Promise<Respo
   // POST /api/compare/:compareId/resume - Resume comparison
   const resumeMatch = pathname.match(/^\/api\/compare\/([^/]+)\/resume$/)
   if (method === "POST" && resumeMatch) {
-    const compareId = decodeURIComponent(resumeMatch[1])
+    const compareId = validateId(decodeURIComponent(resumeMatch[1]))
+    if (!compareId) return json({ error: "Invalid compareId" }, 400)
 
     if (isCompareActive(compareId)) {
       return json({ error: "Comparison is already active" }, 409)
@@ -317,7 +399,8 @@ export async function handleCompareRoutes(req: Request, url: URL): Promise<Respo
   // DELETE /api/compare/:compareId - Delete comparison
   const deleteMatch = pathname.match(/^\/api\/compare\/([^/]+)$/)
   if (method === "DELETE" && deleteMatch) {
-    const compareId = decodeURIComponent(deleteMatch[1])
+    const compareId = validateId(decodeURIComponent(deleteMatch[1]))
+    if (!compareId) return json({ error: "Invalid compareId" }, 400)
 
     if (isCompareActive(compareId)) {
       return json({ error: "Cannot delete active comparison" }, 409)

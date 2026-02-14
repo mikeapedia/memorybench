@@ -1,10 +1,18 @@
 import { eq, desc, and } from "drizzle-orm"
 import { existsSync, readFileSync } from "fs"
 import { join } from "path"
+import { z } from "zod"
 import { db, schema } from "../db"
 import { CheckpointManager } from "../../orchestrator/checkpoint"
 import { createBenchmark } from "../../benchmarks"
 import type { BenchmarkName } from "../../types/benchmark"
+import { getAvailableProviders } from "../../providers"
+
+const addToLeaderboardSchema = z.object({
+  runId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
+  notes: z.string().optional(),
+  version: z.string().optional(),
+})
 
 const checkpointManager = new CheckpointManager()
 
@@ -78,19 +86,22 @@ export async function handleLeaderboardRoutes(req: Request, url: URL): Promise<R
 
       return json({ entries: parsed })
     } catch (e) {
-      return json({ error: e instanceof Error ? e.message : "Failed to load leaderboard" }, 500)
+      return json({ error: "Failed to load leaderboard" }, 500)
     }
   }
 
   // POST /api/leaderboard - Add run to leaderboard
   if (method === "POST" && pathname === "/api/leaderboard") {
     try {
-      const body = await req.json()
-      const { runId, notes, version } = body
-
-      if (!runId) {
-        return json({ error: "runId is required" }, 400)
+      const raw = await req.json()
+      const parsed = addToLeaderboardSchema.safeParse(raw)
+      if (!parsed.success) {
+        return json(
+          { error: "Invalid request body", details: parsed.error.flatten().fieldErrors },
+          400
+        )
       }
+      const { runId, notes, version } = parsed.data
 
       // Use provided version or default to "baseline"
       const entryVersion = version?.trim() || "baseline"
@@ -217,7 +228,7 @@ export async function handleLeaderboardRoutes(req: Request, url: URL): Promise<R
         },
       })
     } catch (e) {
-      return json({ error: e instanceof Error ? e.message : "Failed to add to leaderboard" }, 500)
+      return json({ error: "Failed to add to leaderboard" }, 500)
     }
   }
 
@@ -241,10 +252,7 @@ export async function handleLeaderboardRoutes(req: Request, url: URL): Promise<R
 
       return json({ message: "Removed from leaderboard", id })
     } catch (e) {
-      return json(
-        { error: e instanceof Error ? e.message : "Failed to remove from leaderboard" },
-        500
-      )
+      return json({ error: "Failed to remove from leaderboard" }, 500)
     }
   }
 
@@ -302,7 +310,7 @@ export async function handleLeaderboardRoutes(req: Request, url: URL): Promise<R
         promptsUsed,
       })
     } catch (e) {
-      return json({ error: e instanceof Error ? e.message : "Failed to get entry" }, 500)
+      return json({ error: "Failed to get entry" }, 500)
     }
   }
 
@@ -310,6 +318,12 @@ export async function handleLeaderboardRoutes(req: Request, url: URL): Promise<R
 }
 
 function getProviderCode(provider: string): string {
+  // Validate against known providers to prevent path traversal
+  const validProviders = getAvailableProviders() as string[]
+  if (!validProviders.includes(provider)) {
+    return `// Unknown provider: ${provider}`
+  }
+
   const providerDir = join(process.cwd(), "src", "providers", provider)
   const indexPath = join(providerDir, "index.ts")
   const promptPath = join(providerDir, "prompt.ts")
@@ -341,6 +355,10 @@ function getProviderCode(provider: string): string {
 }
 
 function getProviderPrompts(provider: string): Record<string, string> | null {
+  // Validate against known providers to prevent path traversal
+  const validProviders = getAvailableProviders() as string[]
+  if (!validProviders.includes(provider)) return null
+
   const providerDir = join(process.cwd(), "src", "providers", provider)
   const prompts: Record<string, string> = {}
 

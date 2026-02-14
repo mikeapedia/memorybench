@@ -11,6 +11,7 @@ import { getAvailableProviders } from "../providers"
 import { getAvailableBenchmarks } from "../benchmarks"
 import { listModelsByProvider, MODEL_ALIASES, DEFAULT_ANSWERING_MODEL } from "../utils/models"
 
+/** Print the main CLI usage help text with available commands and options. */
 function printHelp(): void {
   console.log(`
 MemoryBench - Benchmarking Framework for Memory Layer Providers
@@ -50,6 +51,7 @@ Run 'bun run src/index.ts help <topic>' for more details:
 `)
 }
 
+/** Print detailed help for all available memory providers and their required environment variables. */
 function printProvidersHelp(): void {
   console.log(`
 Memory Providers
@@ -66,13 +68,26 @@ Available providers for storing and retrieving memories:
   zep            Zep - Long-term memory for AI assistants
                  Requires: ZEP_API_KEY
 
+  hindsight      Hindsight - Biomimetic agent memory (retain/recall/reflect)
+                 Requires: HINDSIGHT_API_URL, HINDSIGHT_API_KEY (optional for local)
+
+  letta          Letta - Agent framework with archival memory
+                 Requires: LETTA_API_KEY
+
+  ensemble       Meta-provider that combines multiple providers
+                 Requires: --ensemble-config <path> to JSON config file
+
 Usage:
   -p supermemory    Use Supermemory as the memory provider
   -p mem0           Use Mem0 as the memory provider
   -p zep            Use Zep as the memory provider
+  -p hindsight      Use Hindsight as the memory provider
+  -p letta          Use Letta as the memory provider
+  -p ensemble       Use ensemble (requires --ensemble-config)
 `)
 }
 
+/** Print detailed help listing all registered LLM models grouped by provider. */
 function printModelsHelp(): void {
   const openaiModels = listModelsByProvider("openai")
   const anthropicModels = listModelsByProvider("anthropic")
@@ -119,6 +134,7 @@ Default answering model: ${DEFAULT_ANSWERING_MODEL}
 `)
 }
 
+/** Print detailed help for all available benchmark datasets. */
 function printBenchmarksHelp(): void {
   console.log(`
 Benchmarks
@@ -145,6 +161,14 @@ Usage:
 `)
 }
 
+/**
+ * Main CLI entry point — dispatches command arguments to the appropriate handler.
+ *
+ * Parses the first argument as the command name and delegates to the corresponding
+ * command module. Uses a simple switch-case pattern (no yargs/commander dependency).
+ *
+ * @param args - CLI arguments after the entry point (e.g., `["run", "-p", "supermemory"]`)
+ */
 export async function cli(args: string[]): Promise<void> {
   const command = args[0]
   const commandArgs = args.slice(1)

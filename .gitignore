@@ -6,7 +6,16 @@
 /rmscripts/
 
 .env
-.env.local
+.env.*
+!.env.example
+
+# Secrets and credentials
+*.pem
+*.key
+*.pfx
+*.p12
+*.keystore
+*.cert
 
 # UI
 ui/node_modules/

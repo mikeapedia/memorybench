@@ -1,5 +1,8 @@
 import type { ServerWebSocket } from "bun"
 
+const MAX_SUBSCRIPTIONS_PER_CLIENT = 50
+const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
+
 interface ClientInfo {
   subscribedRuns: Set<string>
 }
@@ -23,7 +26,11 @@ export class WebSocketManager {
 
       switch (data.type) {
         case "subscribe":
-          if (data.runId) {
+          if (
+            typeof data.runId === "string" &&
+            SAFE_ID.test(data.runId) &&
+            client.subscribedRuns.size < MAX_SUBSCRIPTIONS_PER_CLIENT
+          ) {
             client.subscribedRuns.add(data.runId)
             ws.send(
               JSON.stringify({
@@ -35,7 +42,7 @@ export class WebSocketManager {
           break
 
         case "unsubscribe":
-          if (data.runId) {
+          if (typeof data.runId === "string" && SAFE_ID.test(data.runId)) {
             client.subscribedRuns.delete(data.runId)
             ws.send(
               JSON.stringify({

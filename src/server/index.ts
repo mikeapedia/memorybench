@@ -14,10 +14,15 @@ export interface ServerOptions {
 
 let uiProcess: Subprocess | null = null
 
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+function getCorsHeaders(reqOrigin?: string | null) {
+  // Only allow requests from localhost origins (any port)
+  const origin =
+    reqOrigin && /^https?:\/\/localhost(:\d+)?$/.test(reqOrigin) ? reqOrigin : "http://localhost"
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  }
 }
 
 export const wsManager = new WebSocketManager()
@@ -26,14 +31,16 @@ export async function startServer(options: ServerOptions): Promise<void> {
   const { port, open = true } = options
 
   const server = Bun.serve({
+    hostname: "127.0.0.1",
     port,
 
     async fetch(req, server) {
       const url = new URL(req.url)
+      const corsHeaders = getCorsHeaders(req.headers.get("origin"))
 
       // Handle CORS preflight
       if (req.method === "OPTIONS") {
-        return new Response(null, { headers: CORS_HEADERS })
+        return new Response(null, { headers: corsHeaders })
       }
 
       // WebSocket upgrade
@@ -65,7 +72,7 @@ export async function startServer(options: ServerOptions): Promise<void> {
         if (response) {
           // Add CORS headers to response
           const headers = new Headers(response.headers)
-          Object.entries(CORS_HEADERS).forEach(([key, value]) => {
+          Object.entries(corsHeaders).forEach(([key, value]) => {
             headers.set(key, value)
           })
           return new Response(response.body, {
@@ -78,13 +85,13 @@ export async function startServer(options: ServerOptions): Promise<void> {
         // 404 for unknown routes
         return new Response(JSON.stringify({ error: "Not found" }), {
           status: 404,
-          headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
         })
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Internal server error"
-        return new Response(JSON.stringify({ error: message }), {
+        logger.error(`Unhandled server error: ${error instanceof Error ? error.message : error}`)
+        return new Response(JSON.stringify({ error: "Internal server error" }), {
           status: 500,
-          headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
         })
       }
     },
@@ -113,7 +120,10 @@ export async function startServer(options: ServerOptions): Promise<void> {
     stdout: "pipe",
     stderr: "inherit",
     env: {
-      ...process.env,
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      USERPROFILE: process.env.USERPROFILE,
+      NODE_ENV: process.env.NODE_ENV || "development",
       NEXT_PUBLIC_API_URL: `http://localhost:${port}`,
     },
   })

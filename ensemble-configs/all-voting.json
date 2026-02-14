@@ -1,0 +1,13 @@
+{
+  "providers": [
+    { "name": "supermemory" },
+    { "name": "mem0" },
+    { "name": "zep" },
+    { "name": "hindsight" },
+    { "name": "letta" }
+  ],
+  "strategy": {
+    "name": "voting",
+    "threshold": 2
+  }
+}

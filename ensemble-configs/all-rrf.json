@@ -1,0 +1,13 @@
+{
+  "providers": [
+    { "name": "supermemory", "weight": 1.0 },
+    { "name": "mem0", "weight": 1.0 },
+    { "name": "zep", "weight": 1.0 },
+    { "name": "hindsight", "weight": 1.0 },
+    { "name": "letta", "weight": 1.0 }
+  ],
+  "strategy": {
+    "name": "rrf",
+    "k": 60
+  }
+}

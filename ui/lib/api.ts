@@ -274,9 +274,34 @@ export interface LeaderboardEntry {
   accuracy: number
   totalQuestions: number
   correctCount: number
-  byQuestionType: Record<string, { total: number; correct: number; accuracy: number }>
+  byQuestionType: Record<
+    string,
+    {
+      total: number
+      correct: number
+      accuracy: number
+      retrieval?: {
+        hitAtK: number
+        precisionAtK: number
+        recallAtK: number
+        f1AtK: number
+        mrr: number
+        ndcg: number
+        k: number
+      }
+    }
+  >
   questionTypeRegistry: QuestionTypeRegistry | null
   latencyStats: LatencyByPhase | null
+  retrieval?: {
+    hitAtK: number
+    precisionAtK: number
+    recallAtK: number
+    f1AtK: number
+    mrr: number
+    ndcg: number
+    k: number
+  }
   evaluations: EvaluationResult[]
   providerCode: string
   promptsUsed: Record<string, string> | null

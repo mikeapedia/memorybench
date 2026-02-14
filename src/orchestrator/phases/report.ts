@@ -5,15 +5,27 @@ import type { RunCheckpoint } from "../../types/checkpoint"
 import type {
   BenchmarkResult,
   EvaluationResult,
+  EnsembleMetadata,
   LatencyStats,
   QuestionTypeStats,
   RetrievalMetrics,
   RetrievalAggregates,
 } from "../../types/unified"
+import { getEnsembleConfig } from "../../utils/config"
 import { logger } from "../../utils/logger"
 
+/** Base directory for run data and report output files. */
 const REPORTS_DIR = "./data/runs"
 
+/**
+ * Aggregate per-question retrieval metrics into averages.
+ *
+ * Computes the arithmetic mean of each metric (Hit@K, Precision, Recall, F1, MRR, NDCG)
+ * across all provided per-question metrics. Returns `undefined` if the input array is empty.
+ *
+ * @param metrics - Array of per-question RetrievalMetrics to average
+ * @returns Averaged RetrievalAggregates, or `undefined` if no metrics provided
+ */
 function aggregateRetrievalMetrics(metrics: RetrievalMetrics[]): RetrievalAggregates | undefined {
   if (metrics.length === 0) return undefined
 
@@ -42,6 +54,16 @@ function aggregateRetrievalMetrics(metrics: RetrievalMetrics[]): RetrievalAggreg
   }
 }
 
+/**
+ * Calculate statistical summary of latency measurements.
+ *
+ * Computes min, max, mean, median, p95, p99, and standard deviation
+ * from an array of duration values in milliseconds. Returns zeroed stats
+ * for empty input arrays.
+ *
+ * @param durations - Array of duration measurements in milliseconds
+ * @returns Statistical summary with percentiles and standard deviation
+ */
 function calculateLatencyStats(durations: number[]): LatencyStats {
   if (durations.length === 0) {
     return { min: 0, max: 0, mean: 0, median: 0, p95: 0, p99: 0, stdDev: 0, count: 0 }
@@ -67,6 +89,21 @@ function calculateLatencyStats(durations: number[]): LatencyStats {
   }
 }
 
+/**
+ * Generate a complete benchmark report from a run checkpoint.
+ *
+ * Iterates over all completed question evaluations in the checkpoint, extracts
+ * per-phase timing data and scores, and computes:
+ * - Overall accuracy (correct / total)
+ * - Per-phase latency statistics (min, max, mean, median, p95, p99)
+ * - Per-question-type accuracy and latency breakdowns
+ * - Aggregated retrieval quality metrics
+ * - Ensemble metadata (if this is an ensemble provider run)
+ *
+ * @param benchmark - The loaded benchmark instance (for question type registry)
+ * @param checkpoint - The completed RunCheckpoint with per-question phase data
+ * @returns A complete BenchmarkResult ready for saving and display
+ */
 export function generateReport(benchmark: Benchmark, checkpoint: RunCheckpoint): BenchmarkResult {
   const questions = benchmark.getQuestions()
   const evaluations: EvaluationResult[] = []
@@ -189,6 +226,19 @@ export function generateReport(benchmark: Benchmark, checkpoint: RunCheckpoint):
   const correctCount = evaluations.filter((e) => e.score === 1).length
   const accuracy = totalQuestions > 0 ? correctCount / totalQuestions : 0
 
+  // Build ensemble metadata if this is an ensemble run
+  let ensembleMetadata: EnsembleMetadata | undefined
+  if (checkpoint.provider === "ensemble") {
+    const ensembleCfg = getEnsembleConfig()
+    if (ensembleCfg) {
+      ensembleMetadata = {
+        strategyName: ensembleCfg.strategy.name,
+        subProviders: ensembleCfg.providers.map((p) => p.name),
+        config: ensembleCfg as unknown as Record<string, unknown>,
+      }
+    }
+  }
+
   const result: BenchmarkResult = {
     provider: checkpoint.provider,
     benchmark: checkpoint.benchmark,
@@ -214,11 +264,21 @@ export function generateReport(benchmark: Benchmark, checkpoint: RunCheckpoint):
     byQuestionType,
     questionTypeRegistry: benchmark.getQuestionTypes(),
     evaluations,
+    ensembleMetadata,
   }
 
   return result
 }
 
+/**
+ * Save a benchmark report to disk as JSON.
+ *
+ * Writes the report to `data/runs/{runId}/report.json`, creating
+ * the directory if it doesn't exist.
+ *
+ * @param result - The BenchmarkResult to persist
+ * @returns Absolute path to the saved report file
+ */
 export function saveReport(result: BenchmarkResult): string {
   const reportsDir = join(REPORTS_DIR, result.runId)
   if (!existsSync(reportsDir)) {
@@ -232,16 +292,39 @@ export function saveReport(result: BenchmarkResult): string {
   return reportPath
 }
 
+/**
+ * Format a LatencyStats object as a fixed-width table row.
+ *
+ * @param stats - Latency statistics to format
+ * @returns Right-aligned row string: min max mean median p95 p99
+ */
 function formatLatencyRow(stats: LatencyStats): string {
   const pad = (n: number) => n.toString().padStart(7)
   return `${pad(stats.min)} ${pad(stats.max)} ${pad(stats.mean)} ${pad(stats.median)} ${pad(stats.p95)} ${pad(stats.p99)}`
 }
 
+/**
+ * Print a formatted benchmark report to stdout.
+ *
+ * Renders the complete report including:
+ * - Provider/benchmark/judge metadata
+ * - Summary accuracy statistics
+ * - Per-phase latency table (min/max/mean/median/p95/p99)
+ * - Retrieval quality metrics (Hit@K, Precision, Recall, F1, MRR, NDCG)
+ * - Per-question-type accuracy and latency breakdown
+ * - Ensemble strategy details (if applicable)
+ *
+ * @param result - The BenchmarkResult to display
+ */
 export function printReport(result: BenchmarkResult): void {
   console.log("\n" + "=".repeat(60))
   console.log("MEMORYBENCH RESULTS")
   console.log("=".repeat(60))
   console.log(`Provider: ${result.provider}`)
+  if (result.ensembleMetadata) {
+    console.log(`  Strategy: ${result.ensembleMetadata.strategyName}`)
+    console.log(`  Sub-providers: ${result.ensembleMetadata.subProviders.join(", ")}`)
+  }
   console.log(`Benchmark: ${result.benchmark}`)
   console.log(`Run ID: ${result.runId}`)
   console.log(`Data Source: ${result.dataSourceRunId}`)

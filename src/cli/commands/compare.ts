@@ -1,10 +1,12 @@
 import type { ProviderName } from "../../types/provider"
 import type { BenchmarkName } from "../../types/benchmark"
 import type { SamplingConfig, SampleType } from "../../types/checkpoint"
+import type { EnsembleConfig } from "../../types/ensemble"
 import { batchManager } from "../../orchestrator/batch"
 import { getAvailableProviders } from "../../providers"
 import { getAvailableBenchmarks } from "../../benchmarks"
 import { DEFAULT_ANSWERING_MODEL } from "../../utils/models"
+import { setEnsembleConfig } from "../../utils/config"
 import { logger } from "../../utils/logger"
 
 const DEFAULT_JUDGE_MODEL = "gpt-4o"
@@ -19,6 +21,7 @@ interface CompareArgs {
   sampleType?: SampleType
   limit?: number
   force?: boolean
+  ensembleConfig?: string
 }
 
 export function parseCompareArgs(args: string[]): CompareArgs | null {
@@ -54,6 +57,8 @@ export function parseCompareArgs(args: string[]): CompareArgs | null {
       parsed.limit = parseInt(args[++i], 10)
     } else if (arg === "--force") {
       parsed.force = true
+    } else if (arg === "--ensemble-config") {
+      parsed.ensembleConfig = args[++i]
     }
   }
 
@@ -86,10 +91,31 @@ export async function compareCommand(args: string[]): Promise<void> {
     console.log("  -l, --limit           Limit total number of questions")
     console.log("  --compare-id          Compare ID (for resuming)")
     console.log("  --force               Clear existing comparison and start fresh")
+    console.log("  --ensemble-config PATH  JSON config file for ensemble provider")
     console.log("")
     console.log("Examples:")
     console.log("  bun run src/index.ts compare -p supermemory,mem0,zep -b locomo -s 5")
+    console.log(
+      "  bun run src/index.ts compare -p supermemory,mem0,ensemble -b locomo --ensemble-config ./ensemble-configs/all-rrf.json -s 5"
+    )
     console.log("  bun run src/index.ts compare --compare-id compare-20251222-103045")
+    return
+  }
+
+  // Load ensemble config if provided or if ensemble is in the provider list
+  if (parsed.ensembleConfig) {
+    try {
+      const configPath = parsed.ensembleConfig
+      const file = Bun.file(configPath)
+      const ensembleJson = (await file.json()) as EnsembleConfig
+      setEnsembleConfig(ensembleJson)
+      logger.info(`Loaded ensemble config from ${configPath}`)
+    } catch (e) {
+      logger.error(`Failed to load ensemble config: ${e}`)
+      return
+    }
+  } else if (parsed.providers?.includes("ensemble")) {
+    logger.error("Ensemble provider requires --ensemble-config <path>")
     return
   }
 

@@ -1,0 +1,9 @@
+{
+  "providers": [
+    { "name": "hindsight", "weight": 1.2 },
+    { "name": "mem0", "weight": 1.0 }
+  ],
+  "strategy": {
+    "name": "weighted"
+  }
+}

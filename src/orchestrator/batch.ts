@@ -11,9 +11,18 @@ import { startRun, endRun } from "../server/runState"
 
 const checkpointManager = new CheckpointManager()
 
+/** Directory for comparison manifests and metadata. */
 const COMPARE_DIR = "./data/compare"
+/** Directory for individual run data and reports. */
 const RUNS_DIR = "./data/runs"
 
+/**
+ * Manifest tracking a multi-provider comparison run.
+ *
+ * Persisted to `data/compare/{compareId}/manifest.json` and used to
+ * coordinate parallel runs, resume interrupted comparisons, and generate
+ * comparison reports.
+ */
 export interface CompareManifest {
   compareId: string
   createdAt: string
@@ -29,6 +38,7 @@ export interface CompareManifest {
   }>
 }
 
+/** Options for initiating a new multi-provider comparison. */
 export interface CompareOptions {
   providers: ProviderName[]
   benchmark: BenchmarkName
@@ -38,6 +48,7 @@ export interface CompareOptions {
   force?: boolean
 }
 
+/** Result returned after all comparison runs complete. */
 export interface CompareResult {
   compareId: string
   manifest: CompareManifest
@@ -45,6 +56,13 @@ export interface CompareResult {
   failures: number
 }
 
+/**
+ * Generate a unique comparison ID based on the current timestamp.
+ *
+ * Format: `compare-YYYYMMDD-HHmmss`
+ *
+ * @returns Unique comparison identifier string
+ */
 function generateCompareId(): string {
   const now = new Date()
   const date = now.toISOString().slice(0, 10).replace(/-/g, "")
@@ -52,6 +70,18 @@ function generateCompareId(): string {
   return `compare-${date}-${time}`
 }
 
+/**
+ * Select a subset of questions based on a sampling configuration.
+ *
+ * Supports three modes:
+ * - `"full"`: Return all question IDs
+ * - `"limit"`: Return the first N question IDs
+ * - `"sample"`: Return N questions per category (consecutive or random)
+ *
+ * @param allQuestions - Full list of questions with IDs and types
+ * @param sampling - Sampling configuration specifying mode and parameters
+ * @returns Array of selected question IDs
+ */
 function selectQuestionsBySampling(
   allQuestions: { questionId: string; questionType: string }[],
   sampling: SamplingConfig
@@ -82,19 +112,41 @@ function selectQuestionsBySampling(
   return allQuestions.map((q) => q.questionId)
 }
 
+/**
+ * Manages multi-provider comparison runs.
+ *
+ * Coordinates running the same benchmark pipeline against multiple providers
+ * in parallel, tracks results via manifests, and generates comparison reports
+ * with accuracy, latency, retrieval quality, and ensemble lift analysis.
+ *
+ * @example
+ * ```ts
+ * const result = await batchManager.compare({
+ *   providers: ["supermemory", "mem0", "zep"],
+ *   benchmark: "locomo",
+ *   judgeModel: "gpt-4o",
+ *   answeringModel: "gpt-4o",
+ * })
+ * batchManager.printComparisonReport(result.manifest)
+ * ```
+ */
 export class BatchManager {
+  /** @param compareId - Comparison identifier */
   private getComparePath(compareId: string): string {
     return join(COMPARE_DIR, compareId)
   }
 
+  /** @param compareId - Comparison identifier */
   private getManifestPath(compareId: string): string {
     return join(this.getComparePath(compareId), "manifest.json")
   }
 
+  /** Check if a comparison manifest exists on disk. */
   exists(compareId: string): boolean {
     return existsSync(this.getManifestPath(compareId))
   }
 
+  /** Persist a comparison manifest to disk, updating the `updatedAt` timestamp. */
   saveManifest(manifest: CompareManifest): void {
     const comparePath = this.getComparePath(manifest.compareId)
     if (!existsSync(comparePath)) {
@@ -104,6 +156,7 @@ export class BatchManager {
     writeFileSync(this.getManifestPath(manifest.compareId), JSON.stringify(manifest, null, 2))
   }
 
+  /** Load a comparison manifest from disk, or return `null` if not found. */
   loadManifest(compareId: string): CompareManifest | null {
     const path = this.getManifestPath(compareId)
     if (!existsSync(path)) return null
@@ -114,6 +167,7 @@ export class BatchManager {
     }
   }
 
+  /** Delete a comparison and all its associated run data from disk. */
   delete(compareId: string): void {
     const comparePath = this.getComparePath(compareId)
     if (existsSync(comparePath)) {
@@ -130,6 +184,7 @@ export class BatchManager {
     }
   }
 
+  /** Load a run's report.json from disk, or return `null` if not found. */
   loadReport(runId: string): BenchmarkResult | null {
     const reportPath = join(RUNS_DIR, runId, "report.json")
     if (!existsSync(reportPath)) return null
@@ -140,11 +195,26 @@ export class BatchManager {
     }
   }
 
+  /**
+   * Run a full comparison: create manifest, then execute all provider runs in parallel.
+   *
+   * @param options - Comparison configuration (providers, benchmark, models, sampling)
+   * @returns CompareResult with success/failure counts and the manifest
+   */
   async compare(options: CompareOptions): Promise<CompareResult> {
     const manifest = await this.createManifest(options)
     return this.executeRuns(manifest)
   }
 
+  /**
+   * Create a comparison manifest by loading the benchmark and selecting questions.
+   *
+   * Generates a unique compareId, loads the benchmark dataset, selects questions
+   * based on sampling config, and creates per-provider run entries.
+   *
+   * @param options - Comparison configuration
+   * @returns Persisted CompareManifest with run IDs for each provider
+   */
   async createManifest(options: CompareOptions): Promise<CompareManifest> {
     const { providers, benchmark, judgeModel, answeringModel, sampling } = options
     const compareId = generateCompareId()
@@ -184,6 +254,14 @@ export class BatchManager {
     return manifest
   }
 
+  /**
+   * Resume an interrupted comparison or delete it with `--force`.
+   *
+   * @param compareId - ID of the comparison to resume
+   * @param force - If true, delete the comparison instead of resuming
+   * @returns CompareResult from the resumed execution
+   * @throws {Error} If the comparison is not found or was force-deleted
+   */
   async resume(compareId: string, force?: boolean): Promise<CompareResult> {
     if (force) {
       this.delete(compareId)
@@ -199,6 +277,16 @@ export class BatchManager {
     return this.executeRuns(manifest)
   }
 
+  /**
+   * Execute all provider runs in a comparison manifest in parallel.
+   *
+   * Each run is registered with the server's active run tracker, executed
+   * via the orchestrator, and unregistered on completion. Failed runs have
+   * their checkpoint status updated to "failed".
+   *
+   * @param manifest - The comparison manifest with provider run entries
+   * @returns CompareResult with success/failure counts
+   */
   async executeRuns(manifest: CompareManifest): Promise<CompareResult> {
     logger.info(`Starting ${manifest.runs.length} parallel runs...`)
 
@@ -259,6 +347,12 @@ export class BatchManager {
     }
   }
 
+  /**
+   * Load all available reports for a comparison's runs.
+   *
+   * @param manifest - The comparison manifest to load reports for
+   * @returns Array of `{ provider, report }` for runs that have completed reports
+   */
   getReports(manifest: CompareManifest): Array<{ provider: string; report: BenchmarkResult }> {
     const reports: Array<{ provider: string; report: BenchmarkResult }> = []
     for (const run of manifest.runs) {
@@ -270,6 +364,19 @@ export class BatchManager {
     return reports
   }
 
+  /**
+   * Print a formatted multi-provider comparison report to stdout.
+   *
+   * Renders tables comparing:
+   * - Overall accuracy (sorted by accuracy, best marked with ←)
+   * - Per-phase latency (fastest marked with ←)
+   * - Retrieval quality metrics (Hit@K, Precision, Recall, F1, MRR, NDCG)
+   * - Per-question-type accuracy with best provider per type
+   * - Ensemble lift analysis (accuracy lift over best individual provider)
+   * - Per-question-type ensemble lift breakdown
+   *
+   * @param manifest - The comparison manifest to generate the report for
+   */
   printComparisonReport(manifest: CompareManifest): void {
     const reports = this.getReports(manifest)
 
@@ -314,9 +421,10 @@ export class BatchManager {
     )
     for (const { provider, report } of sortedByAccuracy) {
       const best = provider === bestAccuracy ? " ←" : ""
+      const label = report.ensembleMetadata ? `${provider} [E]` : provider
       console.log(
         "│ " +
-          pad(provider, 15) +
+          pad(label, 15) +
           " │ " +
           padNum(report.summary.correctCount, 8) +
           " │ " +
@@ -609,15 +717,176 @@ export class BatchManager {
       console.log(borderBot)
     }
 
+    // Ensemble-specific metrics: show lift over best individual provider
+    const ensembleReports = reports.filter((r) => r.report.ensembleMetadata)
+    const individualReports = reports.filter((r) => !r.report.ensembleMetadata)
+
+    if (ensembleReports.length > 0 && individualReports.length > 0) {
+      const bestIndividualAccuracy = Math.max(
+        ...individualReports.map((r) => r.report.summary.accuracy)
+      )
+      const bestIndividualProvider = individualReports.find(
+        (r) => r.report.summary.accuracy === bestIndividualAccuracy
+      )?.provider
+
+      console.log("\nENSEMBLE ANALYSIS")
+      console.log(
+        "┌" +
+          "─".repeat(25) +
+          "┬" +
+          "─".repeat(14) +
+          "┬" +
+          "─".repeat(12) +
+          "┬" +
+          "─".repeat(14) +
+          "┬" +
+          "─".repeat(22) +
+          "┐"
+      )
+      console.log(
+        "│ " +
+          pad("Ensemble", 23) +
+          " │ " +
+          pad("Accuracy", 12) +
+          " │ " +
+          pad("Lift", 10) +
+          " │ " +
+          pad("Strategy", 12) +
+          " │ " +
+          pad("Sub-providers", 20) +
+          " │"
+      )
+      console.log(
+        "├" +
+          "─".repeat(25) +
+          "┼" +
+          "─".repeat(14) +
+          "┼" +
+          "─".repeat(12) +
+          "┼" +
+          "─".repeat(14) +
+          "┼" +
+          "─".repeat(22) +
+          "┤"
+      )
+
+      for (const { provider, report } of ensembleReports) {
+        const ensAcc = report.summary.accuracy
+        const lift = ensAcc - bestIndividualAccuracy
+        const liftStr =
+          lift >= 0
+            ? `+${(lift * 100).toFixed(1)}%`
+            : `${(lift * 100).toFixed(1)}%`
+        const strategy = report.ensembleMetadata?.strategyName || "?"
+        const subProviders = report.ensembleMetadata?.subProviders?.join("+") || "?"
+        const truncSubs = subProviders.length > 20 ? subProviders.slice(0, 17) + "..." : subProviders
+
+        console.log(
+          "│ " +
+            pad(provider, 23) +
+            " │ " +
+            padPct(ensAcc, 12) +
+            " │ " +
+            liftStr.padStart(10) +
+            " │ " +
+            pad(strategy, 12) +
+            " │ " +
+            pad(truncSubs, 20) +
+            " │"
+        )
+      }
+
+      console.log(
+        "└" +
+          "─".repeat(25) +
+          "┴" +
+          "─".repeat(14) +
+          "┴" +
+          "─".repeat(12) +
+          "┴" +
+          "─".repeat(14) +
+          "┴" +
+          "─".repeat(22) +
+          "┘"
+      )
+      console.log(
+        `  Best individual: ${bestIndividualProvider} (${(bestIndividualAccuracy * 100).toFixed(1)}%)`
+      )
+
+      // Per-question-type ensemble lift
+      if (allTypes.size > 0 && ensembleReports.length > 0) {
+        console.log("\nENSEMBLE LIFT BY QUESTION TYPE")
+        const ensReport = ensembleReports[0].report
+
+        const liftRows: Array<{ type: string; indBest: number; ensAcc: number; lift: number; bestProv: string }> = []
+        for (const type of [...allTypes].sort()) {
+          const ensStats = ensReport.byQuestionType[type]
+          if (!ensStats) continue
+
+          let bestIndAcc = 0
+          let bestProv = ""
+          for (const { provider: prov, report: r } of individualReports) {
+            const s = r.byQuestionType[type]
+            if (s && s.accuracy > bestIndAcc) {
+              bestIndAcc = s.accuracy
+              bestProv = prov
+            }
+          }
+
+          liftRows.push({
+            type,
+            indBest: bestIndAcc,
+            ensAcc: ensStats.accuracy,
+            lift: ensStats.accuracy - bestIndAcc,
+            bestProv,
+          })
+        }
+
+        if (liftRows.length > 0) {
+          console.log(
+            "┌" + "─".repeat(19) + "┬" + "─".repeat(14) + "┬" + "─".repeat(14) + "┬" + "─".repeat(12) + "┐"
+          )
+          console.log(
+            "│ " + pad("Type", 17) + " │ " + pad("Best Indiv.", 12) + " │ " + pad("Ensemble", 12) + " │ " + pad("Lift", 10) + " │"
+          )
+          console.log(
+            "├" + "─".repeat(19) + "┼" + "─".repeat(14) + "┼" + "─".repeat(14) + "┼" + "─".repeat(12) + "┤"
+          )
+
+          for (const row of liftRows) {
+            const liftStr = row.lift >= 0 ? `+${(row.lift * 100).toFixed(1)}%` : `${(row.lift * 100).toFixed(1)}%`
+            console.log(
+              "│ " +
+                pad(row.type, 17) +
+                " │ " +
+                padPct(row.indBest, 12) +
+                " │ " +
+                padPct(row.ensAcc, 12) +
+                " │ " +
+                liftStr.padStart(10) +
+                " │"
+            )
+          }
+
+          console.log(
+            "└" + "─".repeat(19) + "┴" + "─".repeat(14) + "┴" + "─".repeat(14) + "┴" + "─".repeat(12) + "┘"
+          )
+        }
+      }
+    }
+
     console.log("\n" + "═".repeat(80))
     if (bestAccuracy) {
       const bestReport = reports.find((r) => r.provider === bestAccuracy)?.report
+      const isEnsemble = bestReport?.ensembleMetadata != null
+      const winnerLabel = isEnsemble ? `${bestAccuracy} [ensemble]` : bestAccuracy
       console.log(
-        `WINNER: ${bestAccuracy} (${(bestReport!.summary.accuracy * 100).toFixed(1)}% overall accuracy)`
+        `WINNER: ${winnerLabel} (${(bestReport!.summary.accuracy * 100).toFixed(1)}% overall accuracy)`
       )
     }
     console.log("═".repeat(80) + "\n")
   }
 }
 
+/** Singleton BatchManager instance used by the CLI and API. */
 export const batchManager = new BatchManager()
